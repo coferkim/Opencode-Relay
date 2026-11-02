@@ -64,7 +64,11 @@ class BunBridge:
 
     @asynccontextmanager
     async def open(
-        self, payload: dict, *, upstream_api_key: str | None = None
+        self,
+        payload: dict,
+        *,
+        upstream_api_key: str | None = None,
+        identity_seed: str | None = None,
     ) -> AsyncIterator[BunResponse]:
         process = None
         stderr_task = None
@@ -96,7 +100,10 @@ class BunBridge:
                 self.processes.add(process)
                 assert process.stdin and process.stdout and process.stderr
                 stderr_task = asyncio.create_task(drain_stderr(process.stderr))
-                process.stdin.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+                worker_payload = dict(payload)
+                if identity_seed:
+                    worker_payload["identitySeed"] = identity_seed
+                process.stdin.write(json.dumps(worker_payload, ensure_ascii=False).encode("utf-8"))
                 await process.stdin.drain()
                 process.stdin.close()
                 deadline = (

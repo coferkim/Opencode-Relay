@@ -264,8 +264,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
             return {"object": "list", "data": data}
 
+    def conversation_seed(request: Request, body: dict[str, Any]) -> str:
+        # Keep one upstream session per conversation. The free tier accounts quota
+        # per session, so minting a fresh one for every tool-loop request causes 429s.
+        for name in (
+            "x-opencode-session",
+            "x-opencode-session-id",
+            "x-session-id",
+            "x-session-affinity",
+            "x-conversation-id",
+            "conversation-id",
+        ):
+            value = (request.headers.get(name) or "").strip()
+            if value:
+                return f"header:{value}"
+        for name in ("conversation_id", "session_id", "thread_id"):
+            value = body.get(name)
+            if isinstance(value, str) and value.strip():
+                return f"body:{value.strip()}"
+        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+        for message in messages:
+            if isinstance(message, dict) and message.get("role") == "user":
+                return "user:" + json.dumps(
+                    message.get("content"), ensure_ascii=False, sort_keys=True
+                )
+        return "model:" + str(body.get("model", ""))
+
     @app.post("/v1/chat/completions", dependencies=[Depends(authorize)])
-    async def chat(payload: ChatRequest):
+    async def chat(payload: ChatRequest, request: Request):
         upstream_request = payload.model_dump(exclude_none=True)
         credential_fields = {"api_key", "apikey", "opencode_api_key", "authorization"}
         for name in tuple(upstream_request):
@@ -277,6 +303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "request": upstream_request,
             },
             upstream_api_key=store.upstream_key(settings.opencode_api_key),
+            identity_seed=conversation_seed(request, upstream_request),
         )
         # Read upstream status before committing the HTTP headers of an SSE response.
         response = await context.__aenter__()

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { aggregateChat } from "../../bridge/aggregate";
-import { buildChatBody, buildRequestHeaders, createIdentity } from "../../bridge/native/request";
+import { buildChatBody, buildRequestHeaders, createIdentity, createIdentityFromSeed } from "../../bridge/native/request";
 import { parseSSE } from "../../bridge/native/sse";
 import { readChatEvents } from "../../frontend/src/api";
 
@@ -31,6 +31,17 @@ describe("Bun native protocol", () => {
     expect(identity.projectID).toMatch(/^[0-9a-f]{40}$/);
     expect(headers["x-opencode-session"]).toBe(headers["x-session-id"]);
     expect(headers.authorization).toBe("Bearer public");
+  });
+
+  test("derives one stable upstream identity from a conversation seed", () => {
+    const first = createIdentityFromSeed("conversation-42");
+    const second = createIdentityFromSeed("conversation-42");
+    const other = createIdentityFromSeed("conversation-43");
+    expect(first).toEqual(second);
+    expect(first.sessionID).toMatch(/^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/);
+    expect(first.projectID).toMatch(/^[0-9a-f]{40}$/);
+    expect(other.sessionID).not.toBe(first.sessionID);
+    expect(other.projectID).not.toBe(first.projectID);
   });
 
   test("SSE handles split CRLF, unicode, comments, and multiline data", async () => {

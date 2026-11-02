@@ -1,5 +1,5 @@
 import { aggregateChat } from "./aggregate";
-import { buildChatBody, buildRequestHeaders, createIdentity } from "./native/request";
+import { buildChatBody, buildRequestHeaders, createIdentity, createIdentityFromSeed } from "./native/request";
 import type { ChatCompletionRequest } from "./native/types";
 
 // stdout: one JSON metadata line followed by the unmodified HTTP body.
@@ -12,17 +12,26 @@ async function head(status: number, headers: Headers | Record<string, string> = 
 }
 
 try {
-  const input = await Bun.stdin.json() as { action: "models" | "chat"; request?: ChatCompletionRequest };
+  const input = await Bun.stdin.json() as {
+    action: "models" | "chat";
+    request?: ChatCompletionRequest;
+    identitySeed?: string;
+  };
   const baseURL = (process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/inference/openai/v1").replace(/\/+$/, "");
   const modelsURL = process.env.OPENCODE_MODELS_URL?.trim() || (
     baseURL.endsWith("/openai/v1")
       ? `${baseURL.slice(0, -"/openai/v1".length)}/v1/models`
       : `${baseURL}/models`
   );
-  const identity = createIdentity({
-    client: process.env.OPENCODE_CLIENT ?? "desktop",
-    version: process.env.OPENCODE_VERSION ?? "2.2.5",
-  });
+  const identity = input.identitySeed
+    ? createIdentityFromSeed(input.identitySeed, {
+        client: process.env.OPENCODE_CLIENT ?? "desktop",
+        version: process.env.OPENCODE_VERSION ?? "2.2.5",
+      })
+    : createIdentity({
+        client: process.env.OPENCODE_CLIENT ?? "desktop",
+        version: process.env.OPENCODE_VERSION ?? "2.2.5",
+      });
   const isChat = input.action === "chat";
   if (input.action !== "models" && !isChat) throw new Error("Unknown worker action");
   if (isChat && !input.request) throw new Error("Missing Chat request");

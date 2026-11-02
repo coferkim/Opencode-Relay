@@ -205,6 +205,24 @@ def test_nonstream_aggregation_and_native_request(client):
     assert headers["x-opencode-session"] == headers["x-session-affinity"]
 
 
+def test_conversation_reuses_upstream_identity(client):
+    first = chat_body()
+    client.post("/v1/chat/completions", json=first)
+    first_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
+    second = chat_body()
+    second["messages"].append({"role": "assistant", "content": "earlier reply"})
+    second["messages"].append({"role": "user", "content": "follow-up"})
+    client.post("/v1/chat/completions", json=second)
+    second_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
+    assert first_headers["x-opencode-session"] == second_headers["x-opencode-session"]
+    assert first_headers["x-opencode-project"] == second_headers["x-opencode-project"]
+    changed = chat_body()
+    changed["messages"][-1]["content"] = "different conversation"
+    client.post("/v1/chat/completions", json=changed)
+    changed_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
+    assert changed_headers["x-opencode-session"] != first_headers["x-opencode-session"]
+
+
 def test_stream_is_forwarded_with_done_and_usage(client):
     with client.stream("POST", "/v1/chat/completions", json=chat_body(stream=True)) as response:
         assert response.status_code == 200

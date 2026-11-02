@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mintProjectID, mintSessionID } from "./identity";
 import type { ChatCompletionRequest, ChatMessage, ChatTool } from "./types";
 
@@ -17,6 +18,24 @@ export function createIdentity(input: Partial<OpenCodeIdentity> = {}): OpenCodeI
     version: input.version ?? DEFAULT_VERSION,
     sessionID: input.sessionID ?? mintSessionID(),
     projectID: input.projectID ?? mintProjectID(),
+  };
+}
+
+const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+function base62From(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => BASE62[byte % BASE62.length]).join("");
+}
+
+/** Stable identity for a conversation, even when the client opens a new worker per turn. */
+export function createIdentityFromSeed(seed: string, input: Partial<OpenCodeIdentity> = {}): OpenCodeIdentity {
+  const digest = createHash("sha256").update(`opencode-relay\0${seed}`).digest();
+  const hex = digest.toString("hex");
+  return {
+    client: input.client ?? DEFAULT_CLIENT,
+    version: input.version ?? DEFAULT_VERSION,
+    sessionID: `ses_${digest.subarray(0, 6).toString("hex")}${base62From(digest.subarray(6, 20))}`,
+    projectID: hex.slice(0, 40),
   };
 }
 
