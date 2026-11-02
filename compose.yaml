@@ -1,0 +1,36 @@
+name: opencode-relay
+
+services:
+  api:
+    build:
+      context: .
+      target: api
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8949:8949"
+    environment:
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-public}
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-https://opencode.ai/inference/openai/v1}
+      OPENCODE_MODELS_URL: ${OPENCODE_MODELS_URL:-}
+      OPENCODE_CLIENT: ${OPENCODE_CLIENT:-desktop}
+      OPENCODE_VERSION: ${OPENCODE_VERSION:-2.2.5}
+      OPENCODE_TIMEOUT_SECONDS: ${OPENCODE_TIMEOUT_SECONDS:-120}
+      OPENCODE_MAX_CONCURRENT_REQUESTS: ${OPENCODE_MAX_CONCURRENT_REQUESTS:-8}
+      RELAY_API_KEY: ${RELAY_API_KEY:-}
+    security_opt:
+      - no-new-privileges:true
+
+  web:
+    build:
+      context: .
+      target: web
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8948:8948"
+    depends_on:
+      api:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true

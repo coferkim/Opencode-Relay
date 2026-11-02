@@ -1,0 +1,51 @@
+name: Checks and Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.6"
+          enable-cache: true
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - name: Install locked dependencies
+        run: |
+          uv sync --locked --python 3.13
+          bun install --frozen-lockfile
+      - name: Test and build
+        run: |
+          uv run pytest -q -W error::ResourceWarning
+          uv run ruff check backend tests
+          bun run test:bridge
+          bun run check
+          bun run build
+      - name: Build Docker services and check health
+        run: |
+          docker compose config --quiet
+          docker compose build --pull
+          docker compose run --rm --no-deps --user root --volume "$PWD/tests:/app/tests:ro" api uv run --locked pytest -q -W error::ResourceWarning
+          docker compose up -d --wait --wait-timeout 90
+          curl --fail --silent http://127.0.0.1:8949/api/health
+          curl --fail --silent http://127.0.0.1:8948/api/health
+          curl --fail --silent http://127.0.0.1:8948/ | grep -q '<div id="app">'
+          curl --fail --silent http://127.0.0.1:8948/openapi.json > /dev/null
+      - name: Container diagnostics
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop containers
+        if: always()
+        run: docker compose down --remove-orphans

@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.venv
+node_modules
+**/node_modules
+frontend/dist
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.taste-skill
+artifacts
+*.log
