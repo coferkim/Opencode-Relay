@@ -1,4 +1,5 @@
 import json
+import secrets
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Annotated, Any, Literal
 
@@ -302,16 +303,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if name.lower() in credential_fields:
                 upstream_request.pop(name)
         seed = conversation_seed(request, upstream_request)
-        context = bridge.open(
-            {
-                "action": "chat",
-                "request": upstream_request,
-            },
-            upstream_api_key=store.upstream_key(settings.opencode_api_key),
-            identity_seed=seed,
-        )
-        # Read upstream status before committing the HTTP headers of an SSE response.
-        response = await context.__aenter__()
+
+        async def open_upstream(identity_seed: str | None):
+            context = bridge.open(
+                {
+                    "action": "chat",
+                    "request": upstream_request,
+                },
+                upstream_api_key=store.upstream_key(settings.opencode_api_key),
+                identity_seed=identity_seed,
+            )
+            return context, await context.__aenter__()
+
+        context, response = await open_upstream(seed)
+        # A free-lane 429 is often scoped to the synthetic session. Retry once
+        # with a fresh identity so agent loops can continue after a stale session.
+        if response.status == 429:
+            await context.__aexit__(None, None, None)
+            retry_seed = f"{seed or 'fresh'}:retry:{secrets.token_hex(8)}"
+            context, response = await open_upstream(retry_seed)
         if not payload.stream or response.status >= 400:
             try:
                 if response.status >= 400:

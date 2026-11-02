@@ -1,5 +1,12 @@
 import { aggregateChat } from "./aggregate";
-import { buildChatBody, buildRequestHeaders, createIdentity, createIdentityFromSeed } from "./native/request";
+import {
+  buildChatBody,
+  buildRequestHeaders,
+  createIdentity,
+  createIdentityFromSeed,
+  restoreToolNamesInResponse,
+} from "./native/request";
+import { parseSSE } from "./native/sse";
 import type { ChatCompletionRequest } from "./native/types";
 
 // stdout: one JSON metadata line followed by the unmodified HTTP body.
@@ -35,6 +42,8 @@ try {
   const isChat = input.action === "chat";
   if (input.action !== "models" && !isChat) throw new Error("Unknown worker action");
   if (isChat && !input.request) throw new Error("Missing Chat request");
+  const built = isChat ? buildChatBody(input.request!) : undefined;
+  const toolNames = built?.toolNames ?? new Map<string, string>();
   const response = await fetch(isChat ? `${baseURL}/chat/completions` : modelsURL, {
     method: isChat ? "POST" : "GET",
     headers: buildRequestHeaders({
@@ -43,19 +52,42 @@ try {
       accept: isChat ? "text/event-stream" : "application/json",
       json: isChat,
     }),
-    ...(isChat ? { body: JSON.stringify(buildChatBody(input.request!)) } : {}),
+    ...(built ? { body: JSON.stringify(built.body) } : {}),
     signal: AbortSignal.timeout(Number(process.env.OPENCODE_TIMEOUT_MS ?? 120000)),
   });
 
   if (response.ok && isChat && input.request?.stream !== true) {
     if (!response.body) throw new Error("Upstream response has no body");
     const result = await aggregateChat(response.body);
+    restoreToolNamesInResponse(result, toolNames);
     await head(response.status, response.headers);
     await Bun.write(Bun.stdout, JSON.stringify(result));
   } else {
     await head(response.status, response.headers);
     if (response.body) {
-      for await (const chunk of response.body) await Bun.write(Bun.stdout, chunk);
+      if (isChat && input.request?.stream === true && toolNames.size > 0) {
+        for await (const event of parseSSE(response.body)) {
+          let data = event.data;
+          if (data !== "[DONE]") {
+            try {
+              const payload = JSON.parse(data);
+              restoreToolNamesInResponse(payload, toolNames);
+              data = JSON.stringify(payload);
+            } catch {
+              // Preserve non-JSON events verbatim.
+            }
+          }
+          const fields = [
+            event.event !== "message" ? `event: ${event.event}` : "",
+            event.id !== undefined ? `id: ${event.id}` : "",
+            event.retry !== undefined ? `retry: ${event.retry}` : "",
+            `data: ${data}`,
+          ].filter(Boolean);
+          await Bun.write(Bun.stdout, `${fields.join("\n")}\n\n`);
+        }
+      } else {
+        for await (const chunk of response.body) await Bun.write(Bun.stdout, chunk);
+      }
     }
   }
 } catch (error) {

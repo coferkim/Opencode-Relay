@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { aggregateChat } from "../../bridge/aggregate";
-import { buildChatBody, buildRequestHeaders, createIdentity, createIdentityFromSeed } from "../../bridge/native/request";
+import {
+  buildChatBody,
+  buildRequestHeaders,
+  createIdentity,
+  createIdentityFromSeed,
+  restoreToolNamesInResponse,
+} from "../../bridge/native/request";
 import { parseSSE } from "../../bridge/native/sse";
 import { readChatEvents } from "../../frontend/src/api";
 
@@ -16,7 +22,7 @@ describe("Bun native protocol", () => {
   test("preserves input and normalizes the required request body", () => {
     const input = { model: "test", messages: [{ role: "system" as const, content: "original" }],
       max_tokens: 12, stream: false, tool_choice: "none" };
-    const body = buildChatBody(input);
+    const { body } = buildChatBody(input);
     expect(input.messages[0]?.content).toBe("original");
     expect(body).toMatchObject({ stream: true, stream_options: { include_usage: true }, max_completion_tokens: 12 });
     expect(body.max_tokens).toBeUndefined();
@@ -24,8 +30,8 @@ describe("Bun native protocol", () => {
     expect(JSON.stringify(body.messages)).toContain("Working directory:");
   });
 
-  test("adds the free-lane tool fingerprint quartet", () => {
-    const body = buildChatBody({
+  test("renames caller tools and adds the free-lane fingerprint quartet", () => {
+    const { body, toolNames } = buildChatBody({
       model: "test",
       messages: [{ role: "user", content: "hello" }],
       tools: [{ type: "function", function: { name: "pwsh" } }],
@@ -33,8 +39,18 @@ describe("Bun native protocol", () => {
     const names = (body.tools as Array<{ function?: { name?: string }; name?: string }>).map(
       (tool) => tool.function?.name ?? tool.name,
     );
-    expect(names).toEqual(expect.arrayContaining(["bash", "glob", "grep", "read", "pwsh"]));
+    expect(names).toEqual(expect.arrayContaining(["tool_0", "bash", "glob", "grep", "read"]));
+    expect(names).not.toContain("pwsh");
+    expect(toolNames.get("tool_0")).toBe("pwsh");
     expect(new Set(names).size).toBe(names?.length ?? 0);
+  });
+
+  test("restores opaque tool names in responses", () => {
+    const chunk = {
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "tool_0", arguments: "{}" } }] } }],
+    };
+    restoreToolNamesInResponse(chunk, new Map([["tool_0", "pwsh"]]));
+    expect(chunk.choices[0]?.delta.tool_calls[0]?.function.name).toBe("pwsh");
   });
 
   test("identity headers share the same session", () => {

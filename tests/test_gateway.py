@@ -16,6 +16,7 @@ from backend.config import Settings
 
 class UpstreamHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[dict]] = []
+    retry_once_count: ClassVar[int] = 0
 
     def log_message(self, *_args):
         pass
@@ -75,6 +76,13 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
+        if body["model"] == "retry-once":
+            self.__class__.retry_once_count += 1
+            if self.__class__.retry_once_count == 1:
+                return self.reply(
+                    429,
+                    b'{"error":{"message":"session quota","type":"rate_limit_error"}}',
+                )
         if body["model"] == "unauthorized":
             return self.reply(
                 401,
@@ -257,6 +265,13 @@ def test_tool_calls_and_finish_reason_are_preserved(client):
     assert tool["function"] == {"name": "read", "arguments": '{"path":"test.txt"}'}
     result = client.post("/v1/chat/completions", json=chat_body("length-model")).json()
     assert result["choices"][0]["finish_reason"] == "length"
+
+
+def test_retries_429_with_fresh_identity(client):
+    response = client.post("/v1/chat/completions", json=chat_body("retry-once"))
+    assert response.status_code == 200
+    assert UpstreamHandler.retry_once_count == 2
+    assert response.json()["choices"][0]["message"]["content"] == "你好，Bun！"
 
 
 @pytest.mark.parametrize("stream", [True, False])
