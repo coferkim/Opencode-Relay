@@ -10,7 +10,8 @@
 - Chat 协议，支持 SSE 流式与 JSON 响应。
 - 模拟 OpenCode 客户端请求头、会话标识与请求格式，由 Bun 原生发送请求。
 - 网页测试请求，查看回答、思考过程、耗时与 tokens 用量。
-- 页面配置 API Key，Docker Compose 一键部署。
+- 页面可配置自己的 API Key，默认为免费Key。
+- Docker Compose 一键部署。
 
 **429 说明：** 实现了客户端协议模拟以此绕过了上游429限制。
 
