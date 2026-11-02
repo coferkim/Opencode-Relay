@@ -24,6 +24,19 @@ describe("Bun native protocol", () => {
     expect(JSON.stringify(body.messages)).toContain("Working directory:");
   });
 
+  test("adds the free-lane tool fingerprint quartet", () => {
+    const body = buildChatBody({
+      model: "test",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ type: "function", function: { name: "pwsh" } }],
+    });
+    const names = (body.tools as Array<{ function?: { name?: string }; name?: string }>).map(
+      (tool) => tool.function?.name ?? tool.name,
+    );
+    expect(names).toEqual(expect.arrayContaining(["bash", "glob", "grep", "read", "pwsh"]));
+    expect(new Set(names).size).toBe(names?.length ?? 0);
+  });
+
   test("identity headers share the same session", () => {
     const identity = createIdentity();
     const headers = buildRequestHeaders({ identity, apiKey: "public", accept: "text/event-stream", json: true });

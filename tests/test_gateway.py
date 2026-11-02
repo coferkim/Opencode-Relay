@@ -229,9 +229,10 @@ def test_tool_loop_reuses_upstream_identity(client):
 
 def test_one_shot_requests_get_fresh_upstream_identity(client):
     first = chat_body()
-    client.post("/v1/chat/completions", json=first)
+    headers = {"x-opencode-session": "ses_00000000000000000000000000"}
+    client.post("/v1/chat/completions", json=first, headers=headers)
     first_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
-    client.post("/v1/chat/completions", json=first)
+    client.post("/v1/chat/completions", json=first, headers=headers)
     second_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
     assert first_headers["x-opencode-session"] != second_headers["x-opencode-session"]
 

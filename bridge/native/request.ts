@@ -67,9 +67,13 @@ export function buildChatBody(request: ChatCompletionRequest): Record<string, un
     ? (body.messages as ChatMessage[]).map((message) => ({ ...message }))
     : [];
   const tools = Array.isArray(body.tools) ? [...(body.tools as ChatTool[])] : [];
+  const hadClientTools = tools.length > 0;
 
   ensureEnvBlock(messages);
   if (!tools.some(isReadTool)) tools.push(READ_TOOL);
+  // OpenCode's free lane fingerprints agent tool declarations by this lowercase
+  // quartet. Preserve real tools and add inert placeholders for missing slots.
+  if (hadClientTools) ensureFingerprintTools(tools);
 
   const limit = request.max_completion_tokens ?? request.max_tokens;
   delete body.max_tokens;
@@ -106,8 +110,29 @@ export const READ_TOOL: ChatTool = {
   },
 };
 
+const FINGERPRINT_TOOLS = ["bash", "glob", "grep", "read"] as const;
+
+function toolName(tool: ChatTool): string {
+  return tool.function?.name ?? tool.name ?? "";
+}
+
 function isReadTool(tool: ChatTool): boolean {
-  return tool.function?.name === "read" || tool.name === "read";
+  return toolName(tool).toLowerCase() === "read";
+}
+
+function ensureFingerprintTools(tools: ChatTool[]): void {
+  const present = new Set(tools.map(toolName).map((name) => name.toLowerCase()));
+  for (const name of FINGERPRINT_TOOLS) {
+    if (present.has(name)) continue;
+    tools.push({
+      type: "function",
+      function: {
+        name,
+        description: "Compatibility placeholder. This tool is unavailable and must not be called.",
+        parameters: { type: "object", properties: {} },
+      },
+    });
+  }
 }
 
 function hasEnvBlock(content: string): boolean {

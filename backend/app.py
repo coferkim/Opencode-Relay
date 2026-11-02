@@ -268,21 +268,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # One-shot probes should get a fresh session; agent/tool loops must keep one.
         messages = body.get("messages") if isinstance(body.get("messages"), list) else []
         has_tools = isinstance(body.get("tools"), list) and bool(body["tools"])
-        has_session = any(
-            (request.headers.get(name) or "").strip()
-            for name in (
-                "x-opencode-session",
-                "x-opencode-session-id",
-                "x-session-id",
-                "x-session-affinity",
-                "x-conversation-id",
-                "conversation-id",
-            )
-        ) or any(
-            isinstance(body.get(name), str) and body[name].strip()
-            for name in ("conversation_id", "session_id", "thread_id")
-        )
-        if not has_tools and not has_session:
+        # A probe with no tools is one-shot even if the client attaches a session
+        # header. Tool-bearing requests are the ones that need session continuity.
+        if not has_tools:
             return None
         for message in messages:
             if isinstance(message, dict) and message.get("role") == "user":
