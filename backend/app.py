@@ -264,9 +264,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
             return {"object": "list", "data": data}
 
-    def conversation_seed(request: Request, body: dict[str, Any]) -> str:
-        # Keep one upstream session per conversation. The free tier accounts quota
-        # per session, so minting a fresh one for every tool-loop request causes 429s.
+    def conversation_seed(request: Request, body: dict[str, Any]) -> str | None:
+        # One-shot probes should get a fresh session; agent/tool loops must keep one.
+        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+        has_tools = isinstance(body.get("tools"), list) and bool(body["tools"])
+        has_session = any(
+            (request.headers.get(name) or "").strip()
+            for name in (
+                "x-opencode-session",
+                "x-opencode-session-id",
+                "x-session-id",
+                "x-session-affinity",
+                "x-conversation-id",
+                "conversation-id",
+            )
+        ) or any(
+            isinstance(body.get(name), str) and body[name].strip()
+            for name in ("conversation_id", "session_id", "thread_id")
+        )
+        if not has_tools and not has_session:
+            return None
+        for message in messages:
+            if isinstance(message, dict) and message.get("role") == "user":
+                return "user:" + json.dumps(
+                    message.get("content"), ensure_ascii=False, sort_keys=True
+                )
         for name in (
             "x-opencode-session",
             "x-opencode-session-id",
@@ -282,12 +304,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             value = body.get(name)
             if isinstance(value, str) and value.strip():
                 return f"body:{value.strip()}"
-        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-        for message in messages:
-            if isinstance(message, dict) and message.get("role") == "user":
-                return "user:" + json.dumps(
-                    message.get("content"), ensure_ascii=False, sort_keys=True
-                )
         return "model:" + str(body.get("model", ""))
 
     @app.post("/v1/chat/completions", dependencies=[Depends(authorize)])
@@ -297,13 +313,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for name in tuple(upstream_request):
             if name.lower() in credential_fields:
                 upstream_request.pop(name)
+        seed = conversation_seed(request, upstream_request)
         context = bridge.open(
             {
                 "action": "chat",
                 "request": upstream_request,
             },
             upstream_api_key=store.upstream_key(settings.opencode_api_key),
-            identity_seed=conversation_seed(request, upstream_request),
+            identity_seed=seed,
         )
         # Read upstream status before committing the HTTP headers of an SSE response.
         response = await context.__aenter__()

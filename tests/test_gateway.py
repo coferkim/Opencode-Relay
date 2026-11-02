@@ -205,22 +205,35 @@ def test_nonstream_aggregation_and_native_request(client):
     assert headers["x-opencode-session"] == headers["x-session-affinity"]
 
 
-def test_conversation_reuses_upstream_identity(client):
-    first = chat_body()
+def test_tool_loop_reuses_upstream_identity(client):
+    tool = {
+        "type": "function",
+        "function": {"name": "read", "description": "Read a file", "parameters": {}},
+    }
+    first = {**chat_body(), "tools": [tool]}
     client.post("/v1/chat/completions", json=first)
     first_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
-    second = chat_body()
+    second = {**chat_body(), "tools": [tool]}
     second["messages"].append({"role": "assistant", "content": "earlier reply"})
     second["messages"].append({"role": "user", "content": "follow-up"})
     client.post("/v1/chat/completions", json=second)
     second_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
     assert first_headers["x-opencode-session"] == second_headers["x-opencode-session"]
     assert first_headers["x-opencode-project"] == second_headers["x-opencode-project"]
-    changed = chat_body()
+    changed = {**chat_body(), "tools": [tool]}
     changed["messages"][-1]["content"] = "different conversation"
     client.post("/v1/chat/completions", json=changed)
     changed_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
     assert changed_headers["x-opencode-session"] != first_headers["x-opencode-session"]
+
+
+def test_one_shot_requests_get_fresh_upstream_identity(client):
+    first = chat_body()
+    client.post("/v1/chat/completions", json=first)
+    first_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
+    client.post("/v1/chat/completions", json=first)
+    second_headers = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
+    assert first_headers["x-opencode-session"] != second_headers["x-opencode-session"]
 
 
 def test_stream_is_forwarded_with_done_and_usage(client):
