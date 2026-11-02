@@ -62,7 +62,7 @@ docker compose up -d --build
 OpenAI 兼容客户端填写上面的 Base URL 和设置页生成的调用 Key（`Authorization: Bearer sk-relay-…`）。
 外部调用必须提供有效 Key；不再接受 `X-OpenCode-API-Key` 覆盖上游配置。
 
-## 本地开发
+## 本地运行
 
 安装 Python 3.13、uv、Bun 1.4.4+ 和 Node.js 22.12+：
 
