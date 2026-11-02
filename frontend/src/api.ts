@@ -30,17 +30,13 @@ export interface ChatChunk {
   [key: string]: unknown;
 }
 
-export interface Credentials {
-  relayApiKey: string;
-  upstreamApiKey: string;
+export interface RelaySettings {
+  api_key: { exists: boolean; prefix: string | null; created_at: number | null; updated_at: number | null };
+  upstream: { configured: boolean };
 }
 
-function headers(credentials: Credentials, json = false): Record<string, string> {
-  return {
-    ...(json ? { "Content-Type": "application/json" } : {}),
-    ...(credentials.relayApiKey ? { Authorization: `Bearer ${credentials.relayApiKey.trim()}` } : {}),
-    ...(credentials.upstreamApiKey.trim() ? { "X-OpenCode-API-Key": credentials.upstreamApiKey.trim() } : {}),
-  };
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public authRequired = false) { super(message); }
 }
 
 async function checkResponse(response: Response): Promise<void> {
@@ -51,11 +47,21 @@ async function checkResponse(response: Response): Promise<void> {
     message = body.error?.message ?? body.detail ?? message;
   } catch { /* Keep HTTP status if upstream error is not JSON. */ }
   const retry = response.headers.get("retry-after");
-  throw new Error(`${message}${retry ? `（请在 ${retry} 秒后重试）` : ""}`);
+  const authRequired = response.headers.get("x-relay-auth-error") === "1";
+  throw new ApiError(`${message}${retry ? `（请在 ${retry} 秒后重试）` : ""}`, response.status, authRequired);
 }
 
-export async function listModels(credentials: Credentials, signal?: AbortSignal): Promise<Model[]> {
-  const response = await fetch("/v1/models", { headers: headers(credentials), signal });
+export async function apiJSON<T>(path: string, method = "GET", body?: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method, credentials: "same-origin", cache: "no-store",
+    ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+  });
+  await checkResponse(response);
+  return await response.json() as T;
+}
+
+export async function listModels(signal?: AbortSignal): Promise<Model[]> {
+  const response = await fetch("/v1/models", { credentials: "same-origin", cache: "no-store", signal });
   await checkResponse(response);
   const result = await response.json();
   if (!Array.isArray(result.data)) throw new Error("模型列表格式不正确。");
@@ -122,13 +128,13 @@ export async function* readChatEvents(body: ReadableStream<Uint8Array>): AsyncGe
 
 export async function sendChat(
   request: ChatRequest,
-  credentials: Credentials,
   signal: AbortSignal,
   onChunk: (chunk: ChatChunk) => void,
   onResponse: (response: Response) => void,
 ): Promise<void> {
   const response = await fetch("/v1/chat/completions", {
-    method: "POST", headers: headers(credentials, true), body: JSON.stringify(request), signal,
+    method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+    body: JSON.stringify(request), signal,
   });
   onResponse(response);
   await checkResponse(response);

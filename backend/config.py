@@ -18,4 +18,5 @@ class Settings(BaseSettings):
     opencode_timeout_seconds: float = Field(default=120, gt=0, le=1800)
     opencode_max_concurrent_requests: int = Field(default=8, ge=1, le=128)
     relay_api_key: str | None = None
+    relay_data_dir: Path = ROOT / "data"
     bun_executable: str = Field(default_factory=lambda: which("bun.exe") or which("bun") or "bun")

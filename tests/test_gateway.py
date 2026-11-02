@@ -75,6 +75,12 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
+        if body["model"] == "unauthorized":
+            return self.reply(
+                401,
+                b'{"error":{"message":"Invalid upstream credential","type":"authentication_error"}}',
+                extra_headers={"x-relay-auth-error": "1"},
+            )
         if body["model"] == "rate-limit":
             return self.reply(
                 429,
@@ -154,6 +160,7 @@ def upstream():
 def client(upstream):
     settings = Settings(opencode_base_url=upstream, opencode_api_key="test-key", _env_file=None)
     with TestClient(create_app(settings)) as client:
+        assert client.post("/api/session", json={}).status_code == 200
         yield client
 
 
@@ -229,6 +236,9 @@ def test_upstream_errors_keep_http_status(client, stream):
     response = client.post("/v1/chat/completions", json=chat_body("html-error", stream))
     assert response.status_code == 502
     assert response.json()["error"]["message"] == "upstream unavailable"
+    response = client.post("/v1/chat/completions", json=chat_body("unauthorized", stream))
+    assert response.status_code == 401
+    assert "x-relay-auth-error" not in response.headers
 
 
 def test_truncated_nonstream_does_not_claim_success(client):
@@ -248,65 +258,19 @@ def test_optional_relay_auth(upstream):
     settings = Settings(opencode_base_url=upstream, relay_api_key="relay-test", _env_file=None)
     with TestClient(create_app(settings)) as client:
         assert client.get("/api/health").json()["auth_required"] is True
-        assert client.get("/v1/models").status_code == 401
-        assert (
-            client.get("/v1/models", headers={"Authorization": "Bearer wrong"}).status_code == 401
-        )
+        response = client.get("/v1/models")
+        assert response.status_code == 401
+        assert response.headers["x-relay-auth-error"] == "1"
+        response = client.get("/v1/models", headers={"Authorization": "Bearer wrong"})
+        assert response.status_code == 401
+        assert response.headers["x-relay-auth-error"] == "1"
         assert (
             client.get("/v1/models", headers={"Authorization": "Bearer relay-test"}).status_code
             == 200
         )
 
 
-@pytest.mark.parametrize("path", ["/v1/models", "/v1/chat/completions"])
-def test_upstream_key_override_is_request_scoped(client, path):
-    def request(key=None):
-        headers = {} if key is None else {"X-OpenCode-API-Key": key}
-        if path == "/v1/models":
-            return client.get(path, headers=headers)
-        return client.post(path, headers=headers, json=chat_body())
-
-    for override, expected in [
-        ("page-only-key", "page-only-key"),
-        (None, "test-key"),
-        ("", "test-key"),
-    ]:
-        response = request(override)
-        assert response.status_code == 200
-        headers = {
-            key.lower(): value for key, value in UpstreamHandler.requests[-1]["headers"].items()
-        }
-        assert headers["authorization"] == f"Bearer {expected}"
-        assert "page-only-key" not in response.text
-        assert "page-only-key" not in str(dict(response.headers))
-    assert client.app.state.bridge.settings.opencode_api_key == "test-key"
-
-
-def test_upstream_key_does_not_bypass_gateway_auth_and_defaults_to_public(upstream):
-    settings = Settings(opencode_base_url=upstream, relay_api_key="gateway-key", _env_file=None)
-    with TestClient(create_app(settings)) as client:
-        headers = {"X-OpenCode-API-Key": "upstream-key"}
-        assert (
-            client.post("/v1/chat/completions", headers=headers, json=chat_body()).status_code
-            == 401
-        )
-        headers["Authorization"] = "Bearer gateway-key"
-        assert (
-            client.post("/v1/chat/completions", headers=headers, json=chat_body()).status_code
-            == 200
-        )
-        actual = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
-        assert actual["authorization"] == "Bearer upstream-key"
-        del headers["X-OpenCode-API-Key"]
-        assert (
-            client.post("/v1/chat/completions", headers=headers, json=chat_body()).status_code
-            == 200
-        )
-        actual = {k.lower(): v for k, v in UpstreamHandler.requests[-1]["headers"].items()}
-        assert actual["authorization"] == "Bearer public"
-
-
-def test_invalid_upstream_key_is_rejected_without_echo(client):
+def test_upstream_key_override_is_no_longer_accepted(client):
     count = len(UpstreamHandler.requests)
     response = client.get("/v1/models", headers={"X-OpenCode-API-Key": "bad key"})
     assert response.status_code == 400
@@ -319,6 +283,7 @@ def test_missing_bun_is_actionable(upstream):
         opencode_base_url=upstream, bun_executable="missing-bun-for-test", _env_file=None
     )
     with TestClient(create_app(settings)) as client:
+        assert client.post("/api/session", json={}).status_code == 200
         result = client.get("/v1/models")
         assert result.status_code == 503
         assert result.json()["error"]["code"] == "bun_missing"
@@ -336,7 +301,9 @@ def test_missing_bun_is_actionable(upstream):
 @pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
 def test_disconnect_cancels_bun_before_and_after_headers(upstream, model, stream, spec_version):
     async def run():
-        app = create_app(Settings(opencode_base_url=upstream, _env_file=None))
+        app = create_app(
+            Settings(opencode_base_url=upstream, relay_api_key="disconnect-key", _env_file=None)
+        )
         body = json.dumps(chat_body(model, stream)).encode()
         incoming = asyncio.Queue()
         await incoming.put({"type": "http.request", "body": body, "more_body": False})
@@ -355,7 +322,10 @@ def test_disconnect_cancels_bun_before_and_after_headers(upstream, model, stream
             "raw_path": b"/v1/chat/completions",
             "query_string": b"",
             "root_path": "",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"authorization", b"Bearer disconnect-key"),
+            ],
             "client": ("127.0.0.1", 1234),
             "server": ("127.0.0.1", 8949),
         }
@@ -377,6 +347,7 @@ def test_disconnect_cancels_bun_before_and_after_headers(upstream, model, stream
 def test_upstream_timeout_is_504(upstream):
     settings = Settings(opencode_base_url=upstream, opencode_timeout_seconds=0.15, _env_file=None)
     with TestClient(create_app(settings)) as client:
+        assert client.post("/api/session", json={}).status_code == 200
         response = client.post("/v1/chat/completions", json=chat_body("slow-headers"))
         assert response.status_code == 504
         assert response.json()["error"]["code"] == "upstream_timeout"

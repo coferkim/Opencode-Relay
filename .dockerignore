@@ -13,3 +13,5 @@ frontend/dist
 .taste-skill
 artifacts
 *.log
+data
+docs

@@ -1,18 +1,30 @@
-import hmac
 import json
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from starlette.types import Receive, Scope, Send
 
 from .bridge import BunBridge, RelayError
 from .config import ROOT, Settings
 from .disconnect import CancelOnDisconnectMiddleware
+from .store import SESSION_COOKIE, SESSION_SECONDS, ConfigStore
+
+
+class KeyInput(BaseModel):
+    api_key: SecretStr = SecretStr("")
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_key(cls, value: SecretStr) -> SecretStr:
+        key = value.get_secret_value().strip()
+        if len(key) > 4096 or any(not 33 <= ord(char) <= 126 for char in key):
+            raise ValueError("API Key 必须为可见 ASCII 字符，最多 4096 字符")
+        return SecretStr(key)
 
 
 class ManagedStreamingResponse(StreamingResponse):
@@ -63,6 +75,7 @@ def is_free_model(model: dict) -> bool:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     bridge = BunBridge(settings)
+    store = ConfigStore(settings.relay_data_dir, settings.relay_api_key)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -72,25 +85,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="OpenCode Relay", version="0.1.0", lifespan=lifespan)
     app.add_middleware(CancelOnDisconnectMiddleware)
     app.state.bridge = bridge
+    app.state.store = store
 
-    async def authorize(authorization: Annotated[str | None, Header()] = None) -> None:
-        if settings.relay_api_key:
-            supplied = authorization or ""
-            expected = f"Bearer {settings.relay_api_key}"
-            if not hmac.compare_digest(supplied.encode(), expected.encode()):
-                raise RelayError("Relay API Key 无效。", 401, "invalid_api_key")
+    def same_origin(request: Request) -> None:
+        origin = request.headers.get("origin")
+        host = request.headers.get("host", "")
+        if (origin and origin not in {f"http://{host}", f"https://{host}"}) or (
+            request.headers.get("sec-fetch-site") not in (None, "same-origin", "none")
+        ):
+            raise RelayError("不允许跨站访问管理接口。", 403, "cross_origin_request")
 
-    async def upstream_key(
-        key: Annotated[str | None, Header(alias="X-OpenCode-API-Key", max_length=4096)] = None,
-    ) -> str | None:
-        key = (key or "").strip()
-        if any(not 33 <= ord(char) <= 126 for char in key):
-            raise RelayError("上游 API Key 包含无效字符。", 400, "invalid_api_key")
-        return key or None
+    def browser_session(request: Request) -> str:
+        same_origin(request)
+        token = request.cookies.get(SESSION_COOKIE, "")
+        if not store.verify_session(token):
+            raise RelayError("请使用调用 API Key 登录设置页。", 401, "session_expired")
+        return token
+
+    async def authorize(
+        request: Request, authorization: Annotated[str | None, Header()] = None
+    ) -> None:
+        # An explicit Bearer token must be valid even if this browser has a session cookie.
+        if authorization is not None:
+            scheme, _, key = authorization.partition(" ")
+            allowed = scheme.lower() == "bearer" and store.verify_key(key)
+        else:
+            token = request.cookies.get(SESSION_COOKIE, "")
+            allowed = store.verify_session(token)
+            if allowed:
+                same_origin(request)
+        if not allowed:
+            message = (
+                "调用 API Key 无效。"
+                if store.key_exists()
+                else "请先在 Web 设置页创建调用 API Key。"
+            )
+            raise RelayError(message, 401, "invalid_api_key")
+        if request.headers.get("x-opencode-api-key") is not None or any(
+            name in request.query_params for name in ("api_key", "apikey", "opencode_api_key")
+        ):
+            raise RelayError(
+                "请在 Web 设置页修改 OpenCode API Key；调用接口只需提供调用 API Key。",
+                400,
+                "upstream_key_not_allowed",
+            )
 
     @app.exception_handler(RelayError)
     async def handle_relay_error(request: Request, exc: RelayError):
-        return JSONResponse(error_body(exc.message, exc.code), status_code=exc.status)
+        # This marker distinguishes gateway authentication failures from upstream 401s.
+        headers = {"X-Relay-Auth-Error": "1"} if exc.status == 401 else None
+        return JSONResponse(
+            error_body(exc.message, exc.code), status_code=exc.status, headers=headers
+        )
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError):
@@ -124,19 +170,85 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 body.decode("utf-8", errors="replace")[:1000] or "上游请求失败。",
                 "upstream_error",
             )
-        return JSONResponse(data, status_code=response.status, headers=response.headers)
+        headers = {
+            name: value
+            for name, value in response.headers.items()
+            if name.lower() != "x-relay-auth-error"
+        }
+        return JSONResponse(data, status_code=response.status, headers=headers)
 
     @app.get("/api/health")
     async def health():
         return {
             "status": "ok",
             "transport": "bun-native",
-            "auth_required": bool(settings.relay_api_key),
+            "auth_required": True,
+            "api_key_created": store.key_exists(),
         }
 
+    @app.get("/api/session")
+    async def session_status(request: Request, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "authenticated": store.verify_session(request.cookies.get(SESSION_COOKIE, "")),
+            "api_key_created": store.key_exists(),
+        }
+
+    @app.post("/api/session", dependencies=[Depends(same_origin)])
+    async def login(payload: KeyInput, request: Request):
+        token = store.login(
+            payload.api_key.get_secret_value(), request.cookies.get(SESSION_COOKIE, "")
+        )
+        response = JSONResponse({"authenticated": True}, headers={"Cache-Control": "no-store"})
+        response.set_cookie(
+            SESSION_COOKIE,
+            token,
+            max_age=SESSION_SECONDS,
+            httponly=True,
+            samesite="strict",
+            secure=request.url.scheme == "https"
+            or request.headers.get("x-forwarded-proto") == "https"
+            or request.headers.get("origin", "").startswith("https://"),
+        )
+        return response
+
+    @app.delete("/api/session", dependencies=[Depends(same_origin)])
+    async def logout(request: Request):
+        store.logout(request.cookies.get(SESSION_COOKIE, ""))
+        response = JSONResponse({"authenticated": False}, headers={"Cache-Control": "no-store"})
+        response.delete_cookie(SESSION_COOKIE)
+        return response
+
+    @app.get("/api/settings", dependencies=[Depends(browser_session)])
+    async def read_settings():
+        return JSONResponse(
+            store.public_settings(settings.opencode_api_key), headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/api/settings/api-key")
+    async def create_key(token: str = Depends(browser_session)):
+        key = store.issue_key(token)
+        return JSONResponse(
+            {"api_key": key}, status_code=201, headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/api/settings/api-key/rotate")
+    async def rotate_key(token: str = Depends(browser_session)):
+        key = store.issue_key(token, rotate=True)
+        return JSONResponse({"api_key": key}, headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/settings/upstream")
+    async def save_upstream(payload: KeyInput, token: str = Depends(browser_session)):
+        store.save_upstream(token, payload.api_key.get_secret_value())
+        return JSONResponse(
+            store.public_settings(settings.opencode_api_key), headers={"Cache-Control": "no-store"}
+        )
+
     @app.get("/v1/models", dependencies=[Depends(authorize)])
-    async def models(free_only: bool = False, api_key: str | None = Depends(upstream_key)):
-        async with bridge.open({"action": "models"}, upstream_api_key=api_key) as response:
+    async def models(free_only: bool = False):
+        async with bridge.open(
+            {"action": "models"}, upstream_api_key=store.upstream_key(settings.opencode_api_key)
+        ) as response:
             if response.status >= 400:
                 return await upstream_error(response)
             catalog = decode_json(await response.read())
@@ -153,13 +265,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"object": "list", "data": data}
 
     @app.post("/v1/chat/completions", dependencies=[Depends(authorize)])
-    async def chat(payload: ChatRequest, api_key: str | None = Depends(upstream_key)):
+    async def chat(payload: ChatRequest):
+        upstream_request = payload.model_dump(exclude_none=True)
+        credential_fields = {"api_key", "apikey", "opencode_api_key", "authorization"}
+        for name in tuple(upstream_request):
+            if name.lower() in credential_fields:
+                upstream_request.pop(name)
         context = bridge.open(
             {
                 "action": "chat",
-                "request": payload.model_dump(exclude_none=True),
+                "request": upstream_request,
             },
-            upstream_api_key=api_key,
+            upstream_api_key=store.upstream_key(settings.opencode_api_key),
         )
         # Read upstream status before committing the HTTP headers of an SSE response.
         response = await context.__aenter__()

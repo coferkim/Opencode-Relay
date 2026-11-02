@@ -18,6 +18,9 @@ services:
       OPENCODE_TIMEOUT_SECONDS: ${OPENCODE_TIMEOUT_SECONDS:-120}
       OPENCODE_MAX_CONCURRENT_REQUESTS: ${OPENCODE_MAX_CONCURRENT_REQUESTS:-8}
       RELAY_API_KEY: ${RELAY_API_KEY:-}
+      RELAY_DATA_DIR: /app/data
+    volumes:
+      - relay-data:/app/data
     security_opt:
       - no-new-privileges:true
 
@@ -34,3 +37,6 @@ services:
         condition: service_healthy
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  relay-data:

@@ -2,10 +2,11 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
   ArrowRight, Check, ChevronRight, Clipboard, Code2, CornerDownLeft,
-  ExternalLink, KeyRound, LoaderCircle, RefreshCw, Search, Send, Square, Terminal,
+  ExternalLink, LoaderCircle, RefreshCw, Search, Send, Settings, Square, Terminal,
   X, Zap,
 } from "@lucide/vue";
-import { listModels, sendChat, type ChatChunk, type ChatRequest, type Model } from "./api";
+import { ApiError, apiJSON, listModels, sendChat, type ChatChunk, type ChatRequest, type Model } from "./api";
+import SettingsPage from "./SettingsPage.vue";
 
 const models = ref<Model[]>([]);
 const modelLoading = ref(false);
@@ -18,11 +19,10 @@ const prompt = ref("用一句话介绍你自己，并告诉我你能帮助我做
 const systemPrompt = ref("你是一位简洁、友好的助手。请使用中文回答。");
 const maxTokens = ref(512);
 const stream = ref(true);
-const relayApiKey = ref("");
-const upstreamApiKey = ref("");
-const credentials = computed(() => ({ relayApiKey: relayApiKey.value, upstreamApiKey: upstreamApiKey.value }));
-const authRequired = ref(false);
-const authOpen = ref(false);
+const authenticated = ref(false);
+const sessionReady = ref(false);
+const sessionError = ref("");
+const view = ref<"playground" | "settings">(location.hash === "#settings" ? "settings" : "playground");
 const mobilePanel = ref<"models" | "request">("models");
 const mobileScreen = ref(window.innerWidth <= 760);
 const tab = ref<"response" | "request" | "raw">("response");
@@ -63,7 +63,7 @@ const requestPayload = computed<ChatRequest>(() => ({
 }));
 const requestJSON = computed(() => JSON.stringify(sentRequest.value ?? requestPayload.value, null, 2));
 const rawJSON = computed(() => chunks.value.map((chunk) => JSON.stringify(chunk, null, 2)).join("\n\n"));
-const canSend = computed(() => selected.value && prompt.value.trim() && !running.value
+const canSend = computed(() => authenticated.value && selected.value && prompt.value.trim() && !running.value
   && Number.isInteger(Number(maxTokens.value)) && Number(maxTokens.value) > 0);
 const stateLabel = computed(() => ({
   idle: "等待请求", running: "正在生成", success: "请求完成", cancelled: "已停止", error: "请求失败",
@@ -83,19 +83,23 @@ function formatLimit(model: Model): string {
 }
 
 async function refreshModels() {
+  if (!authenticated.value) return;
   modelController?.abort();
   const current = new AbortController();
   modelController = current;
   modelLoading.value = true;
   modelError.value = "";
   try {
-    models.value = await listModels(credentials.value, current.signal);
+    models.value = await listModels(current.signal);
     updatedAt.value = new Date();
     if (!models.value.some((model) => model.id === selectedId.value)) {
       selectedId.value = models.value.find((model) => model.is_free)?.id ?? models.value[0]?.id ?? "";
     }
   } catch (error) {
-    if (!current.signal.aborted) modelError.value = error instanceof Error ? error.message : "模型获取失败。";
+    if (!current.signal.aborted) {
+      modelError.value = error instanceof Error ? error.message : "模型获取失败。";
+      if (error instanceof ApiError && error.authRequired) lock();
+    }
   } finally {
     if (modelController === current) modelLoading.value = false;
   }
@@ -119,7 +123,7 @@ async function submit() {
   const start = performance.now();
   timer = setInterval(() => { elapsed.value = performance.now() - start; }, 50);
   try {
-    await sendChat(sentRequest.value, credentials.value, current.signal, (chunk) => {
+    await sendChat(sentRequest.value, current.signal, (chunk) => {
       chunks.value.push(chunk);
       if (chunk.model) servedModel.value = chunk.model;
       if (chunk.usage) usage.value = chunk.usage;
@@ -141,6 +145,7 @@ async function submit() {
     else {
       requestState.value = "error";
       requestError.value = error instanceof Error ? error.message : "请求失败，请重试。";
+      if (error instanceof ApiError && error.authRequired) lock();
     }
   } finally {
     elapsed.value = performance.now() - start;
@@ -164,7 +169,7 @@ function example() {
 }
 
 function keyboard(event: KeyboardEvent) {
-  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+  if (view.value === "playground" && (event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
     void submit();
   }
@@ -172,33 +177,69 @@ function keyboard(event: KeyboardEvent) {
 
 function resize() { mobileScreen.value = window.innerWidth <= 760; }
 
+function navigate(next: "playground" | "settings") {
+  view.value = next;
+  location.hash = next;
+}
+
+function hashChange() { view.value = location.hash === "#settings" ? "settings" : "playground"; }
+
+function lock() {
+  authenticated.value = false; models.value = []; selectedId.value = "";
+  modelController?.abort(); controller?.abort();
+  navigate("settings");
+}
+
+async function loggedIn() {
+  authenticated.value = true;
+  await refreshModels();
+}
+
+async function initialize() {
+  sessionError.value = ""; sessionReady.value = false;
+  try {
+    const session = await apiJSON<{ authenticated: boolean; api_key_created: boolean }>("/api/session");
+    authenticated.value = session.authenticated;
+    if (!session.authenticated && !session.api_key_created) {
+      await apiJSON("/api/session", "POST", {});
+      authenticated.value = true;
+    }
+    if (!authenticated.value) navigate("settings");
+  } catch (error) {
+    sessionError.value = error instanceof Error ? error.message : "无法连接服务。";
+  } finally { sessionReady.value = true; }
+  if (authenticated.value) await refreshModels();
+}
+
 onMounted(async () => {
   window.addEventListener("keydown", keyboard);
   window.addEventListener("resize", resize);
-  try {
-    const response = await fetch("/api/health");
-    authRequired.value = Boolean((await response.json()).auth_required);
-    authOpen.value = authRequired.value;
-  } catch { /* Model loading displays the actionable connection error. */ }
-  await refreshModels();
+  window.addEventListener("hashchange", hashChange);
+  await initialize();
 });
 onUnmounted(() => {
   controller?.abort(); modelController?.abort(); clearInterval(timer); clearTimeout(copyTimer);
   window.removeEventListener("keydown", keyboard);
   window.removeEventListener("resize", resize);
+  window.removeEventListener("hashchange", hashChange);
 });
 </script>
 
 <template>
-  <div class="app-shell">
-    <aside class="sidebar" :class="{ 'mobile-hidden': mobilePanel === 'request' }" aria-label="模型列表">
+  <div class="app-shell" :class="{ 'settings-mode': view === 'settings', 'mobile-detail': mobilePanel === 'request' }">
+    <aside class="sidebar" aria-label="工作台导航">
       <a class="brand" href="/" aria-label="OpenCode Relay 首页">
         <svg class="relay-mark" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
           <path d="M4 8h9l4 6-4 6H4M15 8h9v12h-9M8 14h13" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
         </svg>
         <span>OpenCode <span class="brand-light">Relay</span></span>
       </a>
-      <div class="catalog-heading"><component :is="mobileScreen ? 'h1' : 'h2'">模型列表</component><span class="catalog-total">{{ models.length }}</span></div>
+      <nav class="side-nav" aria-label="主导航">
+        <a href="#playground" :class="{ active: view === 'playground' }" :aria-current="view === 'playground' ? 'page' : undefined" @click.prevent="navigate('playground')"><Terminal :size="17"/>请求测试</a>
+        <a href="#settings" :class="{ active: view === 'settings' }" :aria-current="view === 'settings' ? 'page' : undefined" @click.prevent="navigate('settings')"><Settings :size="17"/>设置</a>
+      </nav>
+      <div v-show="view === 'playground'" class="catalog-area" :class="{ 'mobile-hidden': mobilePanel === 'request' }">
+      <div class="catalog-heading"><component :is="mobileScreen && view === 'playground' && mobilePanel === 'models' ? 'h1' : 'h2'">模型列表</component><span class="catalog-total">{{ models.length }}</span></div>
       <div class="model-search"><Search :size="15" aria-hidden="true" /><input v-model="search" aria-label="搜索模型" placeholder="搜索模型…" /></div>
       <div class="catalog-tabs" aria-label="模型范围">
         <button :class="{ active: freeOnly }" @click="freeOnly = true">免费 <span>{{ freeCount }}</span></button>
@@ -219,18 +260,20 @@ onUnmounted(() => {
         <span><span class="status-dot" :class="{ offline: modelError }"></span>{{ modelLoading ? '正在同步模型' : modelError ? '模型同步失败' : updatedAt ? '模型已同步' : '等待连接' }}</span>
         <span>{{ updatedAt?.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }) ?? '—' }}</span>
       </div>
+      </div>
+      <div v-if="view === 'settings'" class="sidebar-footer"><span class="status-dot" :class="{ offline: !authenticated }"></span>{{ authenticated ? '工作台已连接' : '等待登录' }}<span>Chat Completions</span></div>
     </aside>
 
-    <div class="workspace" :class="{ 'mobile-hidden': mobilePanel === 'models' }">
-      <header class="topbar"><div class="breadcrumbs"><button class="mobile-back icon-button" aria-label="返回模型列表" @click="mobilePanel = 'models'"><ArrowRight :size="17" /></button><span>工作台</span><ChevronRight :size="13"/><strong>Chat Playground</strong></div><a href="/docs" target="_blank" rel="noreferrer" class="docs-link">API 文档 <ExternalLink :size="13"/></a></header>
+    <div class="workspace" :class="{ 'mobile-hidden': view === 'playground' && mobilePanel === 'models' }">
+      <header class="topbar"><div class="breadcrumbs"><button v-if="view === 'playground'" class="mobile-back icon-button" aria-label="返回模型列表" @click="mobilePanel = 'models'"><ArrowRight :size="17" /></button><span>工作台</span><ChevronRight :size="13"/><strong>{{ view === 'settings' ? '设置' : '请求测试' }}</strong></div><a href="/docs" target="_blank" rel="noreferrer" class="docs-link">API 文档 <ExternalLink :size="13"/></a></header>
       <main class="sheet">
-        <div class="page-heading"><div><h1>Chat Playground</h1><p>选择一个模型，发送你的第一个 Chat 请求。</p></div><button class="button key-button" :class="{ 'key-set': upstreamApiKey || relayApiKey }" :aria-expanded="authOpen" aria-controls="key-settings" @click="authOpen = !authOpen"><KeyRound :size="14"/>API Key 配置</button></div>
+        <p v-if="sessionError" class="settings-alert error" role="alert">{{ sessionError }}<button class="text-button" @click="initialize">重新连接</button></p>
+        <p v-if="!sessionReady" class="settings-loading"><LoaderCircle :size="16" class="spinning"/>正在连接工作台…</p>
+        <SettingsPage v-else-if="view === 'settings'" :authenticated="authenticated" @authenticated="loggedIn" @changed="refreshModels" @logout="lock"/>
+        <template v-else>
+        <div class="page-heading"><div><h1>请求测试</h1><p>选择一个模型，发送 Chat 请求。</p></div><button class="button" @click="navigate('settings')"><Settings :size="14"/>设置</button></div>
         <p class="free-notice"><Zap :size="14" aria-hidden="true"/><span>您如果只使用免费模型那么不用进行任何配置</span></p>
-        <form v-if="authOpen" id="key-settings" class="auth-panel" @submit.prevent="refreshModels(); authOpen = false">
-          <div class="field"><label for="upstream-key">OpenCode API Key <span>付费模型可选配置</span></label><div class="auth-input"><input id="upstream-key" v-model="upstreamApiKey" type="password" placeholder="留空使用服务端配置；默认即可使用免费模型" autocomplete="off" spellcheck="false" /></div></div>
-          <div class="field"><label for="relay-key">Relay API Key <span>{{ authRequired ? '网关已开启鉴权，必填' : '仅网关开启鉴权时需要' }}</span></label><div class="auth-input"><input id="relay-key" v-model="relayApiKey" type="password" placeholder="输入服务端配置的 RELAY_API_KEY（非上游 Key）" autocomplete="off" spellcheck="false" /></div></div>
-          <div class="auth-actions"><p>密钥仅保留在当前页面内存，不写入浏览器存储。上游 Key 仅用于当前请求；刷新页面后清除。</p><button class="button" type="submit">应用配置</button></div>
-        </form>
+        <p v-if="!authenticated" class="settings-alert error">请先到设置页登录工作台。<button class="text-button" @click="navigate('settings')">前往设置</button></p>
         <div class="endpoint-strip"><span class="method">POST</span><code>/v1/chat/completions</code><span class="protocol-note">OpenAI Chat 兼容</span></div>
 
         <div class="playground-grid">
@@ -264,9 +307,10 @@ onUnmounted(() => {
           </section>
         </div>
         <footer class="page-footer"><span><Code2 :size="13"/>Chat Completions</span><span>OpenCode Relay <span class="footer-divider">/</span> {{ stream ? 'SSE streaming' : 'JSON response' }}</span></footer>
+        </template>
       </main>
     </div>
-    <div class="mobile-start" v-if="mobilePanel === 'models'"><button class="button primary" :disabled="!selected" @click="mobilePanel = 'request'">开始请求 <ArrowRight :size="16"/></button></div>
+    <div class="mobile-start" v-if="view === 'playground' && mobilePanel === 'models'"><button class="button primary" :disabled="!selected" @click="mobilePanel = 'request'">开始请求 <ArrowRight :size="16"/></button></div>
     <div v-if="copied" class="copy-toast" role="status">{{ copied }}</div>
   </div>
 </template>

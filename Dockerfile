@@ -17,7 +17,8 @@ COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --locked --no-dev --no-install-project
 COPY backend/ backend/
 COPY bridge/ bridge/
-RUN groupadd --system relay && useradd --system --create-home --gid relay relay
+RUN groupadd --system relay && useradd --system --create-home --gid relay relay \
+    && mkdir /app/data && chown relay:relay /app/data && chmod 700 /app/data
 USER relay
 EXPOSE 8949
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
