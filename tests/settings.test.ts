@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
@@ -114,10 +114,15 @@ describe("settings and sessions", () => {
     expect(statuses.filter((status) => status === 201)).toHaveLength(1);
     expect(statuses.filter((status) => status === 409)).toHaveLength(7);
 
-    const db = new Database(join(app.dataDir, "relay.sqlite3"));
-    expect(db.query("SELECT COUNT(*) AS n FROM config").get()).toEqual({ n: 1 });
-    expect(() => db.exec("INSERT INTO config (id) VALUES (2)")).toThrow();
-    db.close();
+    const config = JSON.parse(readFileSync(join(app.dataDir, "config.json"), "utf8"));
+    expect(config.version).toBe(1);
+    expect(typeof config.api_key.hash).toBe("string");
+    expect(config.api_key.hash).toHaveLength(64);
+    // Only a hash and a short prefix are stored; never the key itself.
+    expect(config.api_key).not.toHaveProperty("value");
+    expect(config.api_key.hash).not.toMatch(/^sk-relay-/);
+    expect(config.api_key.prefix).toMatch(/^sk-relay-/);
+    expect(config.api_key.prefix.length).toBeLessThan(24);
   });
 
   test("rotation revokes the old key and other sessions", async () => {
@@ -271,9 +276,10 @@ describe("settings and sessions", () => {
       ).status,
     ).toBe(401);
 
-    const db = new Database(join(app.dataDir, "relay.sqlite3"));
-    db.exec("UPDATE sessions SET expires_at=0");
-    db.close();
+    const sessionsPath = join(app.dataDir, "sessions.json");
+    const shard = JSON.parse(readFileSync(sessionsPath, "utf8"));
+    for (const hash of Object.keys(shard.sessions)) shard.sessions[hash] = 0;
+    writeFileSync(sessionsPath, JSON.stringify(shard));
 
     expect((await browser.get("/api/settings")).status).toBe(401);
     expect((await browser.get("/v1/models")).status).toBe(401);
